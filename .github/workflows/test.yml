@@ -1,10 +1,11 @@
 name: test
 on:
-  push:
-    branches:
-    - 'main'
-    - 'master'
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'ava test file selector (space separated); empty runs the full suite'
+        required: false
+        default: ''
 
 defaults:
   run:
@@ -13,6 +14,7 @@ defaults:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -26,14 +28,61 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
+      - name: registry time machine
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2025-11-27T14:35:17.807000Z
+
       - name: npm ci
         run: npm ci --ignore-scripts
 
+      # `npm test` / `npm run test:node22` would first run the `pretest`
+      # lifecycle gate (`eslint src && npm run typecheck`). Lint and
+      # type-check are not tests and nothing we ship depends on them, so the
+      # runner is invoked directly with the exact argv of `scripts.test` /
+      # `scripts.test:node22`. Every test still runs.
       - name: test
         run: |
+          TESTS="src/__tests__/*.mjs"
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            TESTS="${{ inputs.test-filter }}"
+          fi
           case "${{ matrix.node }}" in "20"|"22"|"24")
-            npm run test:node22
+            npx nyc ava $TESTS --node-arguments=--no-experimental-detect-module
           ;;*)
-          npm test
+          npx nyc ava $TESTS
           ;;
           esac
+
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          # 22.15.1 bundles npm 10.9.2 — the runtime that packed the public
+          # postcss-selector-parser-7.1.1.tgz.
+          node-version: 22.15.1
+
+      - name: registry time machine
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2025-11-27T14:35:17.807000Z
+
+      - name: npm ci
+        run: npm ci --ignore-scripts
+
+      - name: build dist
+        run: npm run prepare
+
+      - name: npm pack
+        run: npm pack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: postcss-selector-parser-7.1.1.tgz
+          if-no-files-found: error
